@@ -29,12 +29,37 @@
 struct bench_params {
     std::string model;
     std::string audio;
-    int32_t     n_threads    = std::min(4, (int32_t) std::thread::hardware_concurrency());
+    int32_t     n_threads    = std::max(1, std::min(4, (int32_t) std::thread::hardware_concurrency()));
     int32_t     n_iterations = 100;
     int32_t     n_warmup     = 5;
-    bool        use_gpu      = true; // harmless for mel; kept for parity with other bench tools
     std::string label;               // free-form tag echoed into the JSON summary
 };
+
+// Minimal JSON string escape so free-form labels don't produce invalid JSON.
+// Stricter than RFC 8259 allows (escapes all <0x20), but simplicity beats
+// completeness for a benchmark tool.
+static std::string json_escape(const std::string & s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if ((unsigned char) c < 0x20) {
+                    char buf[8];
+                    snprintf(buf, sizeof(buf), "\\u%04x", (unsigned char) c);
+                    out += buf;
+                } else {
+                    out += c;
+                }
+        }
+    }
+    return out;
+}
 
 static void print_usage(const char * argv0, const bench_params & p) {
     fprintf(stderr, "\n");
@@ -46,7 +71,6 @@ static void print_usage(const char * argv0, const bench_params & p) {
     fprintf(stderr, "  -w N,      --warmup N         [%-7d] untimed warmup iterations\n", p.n_warmup);
     fprintf(stderr, "  -t N,      --threads N        [%-7d] threads passed to whisper_pcm_to_mel\n", p.n_threads);
     fprintf(stderr, "  -l TAG,    --label TAG        [%-7s] free-form tag echoed into JSON summary\n", p.label.c_str());
-    fprintf(stderr, "  -ng,       --no-gpu                   disable GPU (no effect on mel, kept for parity)\n");
     fprintf(stderr, "  -h,        --help                     show this help\n");
     fprintf(stderr, "\n");
 }
@@ -65,12 +89,23 @@ static bool parse_args(int argc, char ** argv, bench_params & p) {
         else if (a == "-w" || a == "--warmup")     { p.n_warmup     = std::atoi(next("-w")); }
         else if (a == "-t" || a == "--threads")    { p.n_threads    = std::atoi(next("-t")); }
         else if (a == "-l" || a == "--label")      { p.label        = next("-l"); }
-        else if (a == "-ng" || a == "--no-gpu")    { p.use_gpu      = false; }
         else { fprintf(stderr, "error: unknown arg: %s\n", a.c_str()); print_usage(argv[0], p); return false; }
     }
     if (p.model.empty() || p.audio.empty()) {
         fprintf(stderr, "error: -m and -f are required\n");
         print_usage(argv[0], p);
+        return false;
+    }
+    if (p.n_iterations <= 0) {
+        fprintf(stderr, "error: --iterations must be > 0 (got %d)\n", p.n_iterations);
+        return false;
+    }
+    if (p.n_warmup < 0) {
+        fprintf(stderr, "error: --warmup must be >= 0 (got %d)\n", p.n_warmup);
+        return false;
+    }
+    if (p.n_threads <= 0) {
+        fprintf(stderr, "error: --threads must be > 0 (got %d)\n", p.n_threads);
         return false;
     }
     return true;
@@ -97,8 +132,13 @@ int main(int argc, char ** argv) {
     }
     const double audio_s = (double) pcmf32.size() / (double) WHISPER_SAMPLE_RATE;
 
+    // log_mel_spectrogram runs entirely on the CPU regardless of use_gpu, and
+    // whisper_pcm_to_mel never touches any ggml backend. Disable GPU init so
+    // the bench doesn't carry backend setup cost it won't use. This also
+    // sidesteps ggml_backend_load_all() — unnecessary for mel, required for
+    // encode/decode on some platforms.
     whisper_context_params cparams = whisper_context_default_params();
-    cparams.use_gpu = params.use_gpu;
+    cparams.use_gpu = false;
     whisper_context * ctx = whisper_init_from_file_with_params(params.model.c_str(), cparams);
     if (ctx == nullptr) {
         fprintf(stderr, "error: failed to load model: %s\n", params.model.c_str());
@@ -157,7 +197,7 @@ int main(int argc, char ** argv) {
         "\"threads\":%d,\"iterations\":%d,\"warmup\":%d,"
         "\"min_ms\":%.6f,\"median_ms\":%.6f,\"mean_ms\":%.6f,"
         "\"p95_ms\":%.6f,\"p99_ms\":%.6f,\"max_ms\":%.6f}\n",
-        params.label.c_str(),
+        json_escape(params.label).c_str(),
         audio_s, pcmf32.size(),
         params.n_threads, params.n_iterations, params.n_warmup,
         p_min, p_50, mean, p_95, p_99, p_max);
