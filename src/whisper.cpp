@@ -2410,7 +2410,11 @@ static bool whisper_encode_internal(
             ggml_backend_sched_reset(sched);
 
 #if defined(WHISPER_USE_COREML)
-            whisper_coreml_encode(wstate.ctx_coreml, mel->ne[0], mel->ne[1], (float *) mel->data, (float *) wstate.embd_enc->data);
+            {
+                const int64_t n_ctx_stride = mel->ne[0];
+                const int64_t n_ctx_actual = std::min<int64_t>(n_ctx_stride, std::max<int64_t>(0, (int64_t)(wstate.mel.n_len_org) - (int64_t)(mel_offset)));
+                whisper_coreml_encode(wstate.ctx_coreml, n_ctx_stride, mel->ne[1], n_ctx_actual, (float *) mel->data, (float *) wstate.embd_enc->data, (int64_t) ggml_nelements(wstate.embd_enc));
+            }
 #elif defined(WHISPER_USE_OPENVINO)
             whisper_openvino_encode(wstate.ctx_openvino, mel, wstate.embd_enc);
 #endif
