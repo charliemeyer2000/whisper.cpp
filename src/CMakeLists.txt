@@ -30,6 +30,7 @@ endif()
 if (WHISPER_COREML)
     find_library(FOUNDATION_FRAMEWORK Foundation)
     find_library(COREML_FRAMEWORK CoreML)
+    find_library(ACCELERATE_FRAMEWORK Accelerate)
 
     if (COREML_FRAMEWORK)
         message(STATUS "CoreML framework found")
@@ -37,6 +38,10 @@ if (WHISPER_COREML)
         set(WHISPER_EXTRA_FLAGS ${WHISPER_EXTRA_FLAGS} -DWHISPER_USE_COREML)
     else()
         message(FATAL_ERROR "CoreML framework not found")
+    endif()
+
+    if (NOT ACCELERATE_FRAMEWORK)
+        message(FATAL_ERROR "Accelerate framework not found (required for FP16->FP32 conversion in whisper.coreml)")
     endif()
 
     if (WHISPER_COREML_ALLOW_FALLBACK)
@@ -71,7 +76,7 @@ if (WHISPER_COREML)
         .
         )
 
-    target_link_libraries(${TARGET} PRIVATE ${FOUNDATION_FRAMEWORK} ${COREML_FRAMEWORK})
+    target_link_libraries(${TARGET} PRIVATE ${FOUNDATION_FRAMEWORK} ${COREML_FRAMEWORK} ${ACCELERATE_FRAMEWORK})
 
     set_target_properties(${TARGET} PROPERTIES
         COMPILE_FLAGS "-fobjc-arc"

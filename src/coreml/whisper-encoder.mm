@@ -6,6 +6,7 @@
 #import "whisper-encoder-impl.h"
 
 #import <CoreML/CoreML.h>
+#import <Accelerate/Accelerate.h>
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -211,7 +212,28 @@ void whisper_coreml_encode(
             const size_t cap = out_nelements > 0 ? (size_t) out_nelements : produced;
             const size_t written = produced < cap ? produced : cap;
             if (written > 0 && outCoreML.output.dataPointer != NULL) {
-                memcpy(out, outCoreML.output.dataPointer, written * sizeof(float));
+                // ANE-targeted mlprograms (compute_precision=FLOAT16) emit FP16
+                // outputs. Convert to FP32 on the way into the ggml embd_enc
+                // buffer; fall back to a straight memcpy for FP32 outputs
+                // (stock 3000-ctx encoder, historical builds).
+                const MLMultiArrayDataType dtype = outCoreML.output.dataType;
+                if (dtype == MLMultiArrayDataTypeFloat16) {
+                    vImage_Buffer src = {
+                        .data = outCoreML.output.dataPointer,
+                        .height = 1,
+                        .width = written,
+                        .rowBytes = written * sizeof(uint16_t),
+                    };
+                    vImage_Buffer dst = {
+                        .data = out,
+                        .height = 1,
+                        .width = written,
+                        .rowBytes = written * sizeof(float),
+                    };
+                    vImageConvert_Planar16FtoPlanarF(&src, &dst, 0);
+                } else {
+                    memcpy(out, outCoreML.output.dataPointer, written * sizeof(float));
+                }
             }
             if (out_nelements > 0 && (size_t) out_nelements > written) {
                 memset(out + written, 0, ((size_t) out_nelements - written) * sizeof(float));
