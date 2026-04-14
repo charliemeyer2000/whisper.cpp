@@ -919,6 +919,12 @@ struct whisper_state {
 
     // [EXPERIMENTAL] speed-up techniques
     int32_t exp_n_audio_ctx = 0; // 0 - use default
+    // User-intended audio ctx ceiling. Mirrors exp_n_audio_ctx whenever an
+    // external setter (e.g. params.audio_ctx in whisper_full_with_state) runs,
+    // and is NOT mutated by CoreML variant selection. whisper_encode_internal
+    // reseeds exp_n_audio_ctx from this on entry so a prior call's variant
+    // shrink does not leak across the public whisper_encode API.
+    int32_t exp_n_audio_ctx_user = 0;
 
     whisper_vad_context * vad_context = nullptr;
 
@@ -2364,6 +2370,39 @@ static bool whisper_encode_internal(
                    void * abort_callback_data) {
     const int64_t t_start_us = ggml_time_us();
 
+#if defined(WHISPER_USE_COREML)
+    // Reseed exp_n_audio_ctx from the user-intended value so a shrink applied
+    // by a prior whisper_encode_internal call does not leak across the public
+    // whisper_encode / whisper_encode_with_state APIs (which, unlike
+    // whisper_full_with_state, do not reset exp_n_audio_ctx themselves).
+    // Inside whisper_full_with_state this is redundant (line 6977 already
+    // reset it), but it is cheap and makes the encode pipeline self-contained.
+    wstate.exp_n_audio_ctx = wstate.exp_n_audio_ctx_user;
+
+    // Pre-select the CoreML encoder variant so downstream tensors are sized
+    // to the variant's actual output range, not the default 30s. This must
+    // happen before whisper_build_graph_conv, which sizes `embd_enc` from
+    // exp_n_audio_ctx. Mutating exp_n_audio_ctx *after* the conv graph is
+    // built triggers a shape mismatch in whisper_build_graph_cross
+    // (embd_enc retains the old dim while the cross graph reads the new one,
+    // crashing ggml_reshape_2d / the flash_attn K-copy).
+    if (whisper_encode_external(wstate) && wstate.ctx_coreml != nullptr) {
+        const int64_t effective_audio_ctx = wstate.exp_n_audio_ctx > 0
+            ? (int64_t) wstate.exp_n_audio_ctx
+            : (int64_t) wctx.model.hparams.n_audio_ctx;
+        const int64_t max_mel_stride = 2 * effective_audio_ctx;
+        const int64_t n_ctx_actual_mel = std::min<int64_t>(
+            max_mel_stride,
+            std::max<int64_t>(0, (int64_t) wstate.mel.n_len_org - (int64_t) mel_offset));
+        const int64_t variant_n_ctx_enc = whisper_coreml_n_ctx_enc_for(wstate.ctx_coreml, n_ctx_actual_mel);
+        // Only shrink — never grow a user-set exp_n_audio_ctx. If the single
+        // stock variant is loaded (no multi-shape siblings), this no-ops.
+        if (variant_n_ctx_enc > 0 && variant_n_ctx_enc < effective_audio_ctx) {
+            wstate.exp_n_audio_ctx = (int32_t) variant_n_ctx_enc;
+        }
+    }
+#endif
+
     // conv
     {
         auto & sched = wstate.sched_conv.sched;
@@ -2410,7 +2449,17 @@ static bool whisper_encode_internal(
             ggml_backend_sched_reset(sched);
 
 #if defined(WHISPER_USE_COREML)
-            whisper_coreml_encode(wstate.ctx_coreml, mel->ne[0], mel->ne[1], (float *) mel->data, (float *) wstate.embd_enc->data);
+            {
+                const int64_t n_ctx_stride = mel->ne[0];
+                // exp_n_audio_ctx was already shrunk to the picked variant's
+                // audio-ctx at the top of whisper_encode_internal, so the
+                // conv graph sized `mel` to 2*variant_n_ctx_enc and
+                // `embd_enc` to [n_state, variant_n_ctx_enc]. Here we just
+                // hand that buffer to the encoder; variant selection inside
+                // whisper_coreml_encode will re-pick the same variant.
+                const int64_t n_ctx_actual = std::min<int64_t>(n_ctx_stride, std::max<int64_t>(0, (int64_t)(wstate.mel.n_len_org) - (int64_t)(mel_offset)));
+                whisper_coreml_encode(wstate.ctx_coreml, n_ctx_stride, mel->ne[1], n_ctx_actual, (float *) mel->data, (float *) wstate.embd_enc->data, (int64_t) ggml_nelements(wstate.embd_enc), NULL);
+            }
 #elif defined(WHISPER_USE_OPENVINO)
             whisper_openvino_encode(wstate.ctx_openvino, mel, wstate.embd_enc);
 #endif
@@ -6939,7 +6988,8 @@ int whisper_full_with_state(
         WHISPER_LOG_ERROR("%s: audio_ctx is larger than the maximum allowed (%d > %d)\n", __func__, params.audio_ctx, whisper_n_audio_ctx(ctx));
         return -5;
     }
-    state->exp_n_audio_ctx = params.audio_ctx;
+    state->exp_n_audio_ctx      = params.audio_ctx;
+    state->exp_n_audio_ctx_user = params.audio_ctx;
 
     // these tokens determine the task that will be performed
     std::vector<whisper_token> prompt_init = { whisper_token_sot(ctx), };
