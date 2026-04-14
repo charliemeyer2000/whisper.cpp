@@ -2364,6 +2364,31 @@ static bool whisper_encode_internal(
                    void * abort_callback_data) {
     const int64_t t_start_us = ggml_time_us();
 
+#if defined(WHISPER_USE_COREML)
+    // Pre-select the CoreML encoder variant so downstream tensors are sized
+    // to the variant's actual output range, not the default 30s. This must
+    // happen before whisper_build_graph_conv, which sizes `embd_enc` from
+    // exp_n_audio_ctx. Mutating exp_n_audio_ctx *after* the conv graph is
+    // built triggers a shape mismatch in whisper_build_graph_cross
+    // (embd_enc retains the old dim while the cross graph reads the new one,
+    // crashing ggml_reshape_2d / the flash_attn K-copy).
+    if (whisper_encode_external(wstate) && wstate.ctx_coreml != nullptr) {
+        const int64_t effective_audio_ctx = wstate.exp_n_audio_ctx > 0
+            ? (int64_t) wstate.exp_n_audio_ctx
+            : (int64_t) wctx.model.hparams.n_audio_ctx;
+        const int64_t max_mel_stride = 2 * effective_audio_ctx;
+        const int64_t n_ctx_actual_mel = std::min<int64_t>(
+            max_mel_stride,
+            std::max<int64_t>(0, (int64_t) wstate.mel.n_len_org - (int64_t) mel_offset));
+        const int64_t variant_n_ctx_enc = whisper_coreml_n_ctx_enc_for(wstate.ctx_coreml, n_ctx_actual_mel);
+        // Only shrink — never grow a user-set exp_n_audio_ctx. If the single
+        // stock variant is loaded (no multi-shape siblings), this no-ops.
+        if (variant_n_ctx_enc > 0 && variant_n_ctx_enc < effective_audio_ctx) {
+            wstate.exp_n_audio_ctx = (int32_t) variant_n_ctx_enc;
+        }
+    }
+#endif
+
     // conv
     {
         auto & sched = wstate.sched_conv.sched;
@@ -2412,21 +2437,14 @@ static bool whisper_encode_internal(
 #if defined(WHISPER_USE_COREML)
             {
                 const int64_t n_ctx_stride = mel->ne[0];
+                // exp_n_audio_ctx was already shrunk to the picked variant's
+                // audio-ctx at the top of whisper_encode_internal, so the
+                // conv graph sized `mel` to 2*variant_n_ctx_enc and
+                // `embd_enc` to [n_state, variant_n_ctx_enc]. Here we just
+                // hand that buffer to the encoder; variant selection inside
+                // whisper_coreml_encode will re-pick the same variant.
                 const int64_t n_ctx_actual = std::min<int64_t>(n_ctx_stride, std::max<int64_t>(0, (int64_t)(wstate.mel.n_len_org) - (int64_t)(mel_offset)));
-                int64_t n_ctx_enc = 0;
-                whisper_coreml_encode(wstate.ctx_coreml, n_ctx_stride, mel->ne[1], n_ctx_actual, (float *) mel->data, (float *) wstate.embd_enc->data, (int64_t) ggml_nelements(wstate.embd_enc), &n_ctx_enc);
-                // Restrict cross-attention (and downstream decoder paths) to
-                // the variant's actual output range. Without this, the zeroed
-                // tail of embd_enc still produces non-zero K/V via bias terms
-                // (K = Wk * 0 + Kb = Kb), so the decoder would attend to
-                // phantom positions with meaningful weight and dilute real
-                // attention. Cap at any pre-existing user-supplied audio_ctx.
-                if (n_ctx_enc > 0) {
-                    const int32_t requested = wstate.exp_n_audio_ctx;
-                    if (requested == 0 || (int64_t) requested > n_ctx_enc) {
-                        wstate.exp_n_audio_ctx = (int32_t) n_ctx_enc;
-                    }
-                }
+                whisper_coreml_encode(wstate.ctx_coreml, n_ctx_stride, mel->ne[1], n_ctx_actual, (float *) mel->data, (float *) wstate.embd_enc->data, (int64_t) ggml_nelements(wstate.embd_enc), NULL);
             }
 #elif defined(WHISPER_USE_OPENVINO)
             whisper_openvino_encode(wstate.ctx_openvino, mel, wstate.embd_enc);

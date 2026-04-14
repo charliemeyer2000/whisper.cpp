@@ -21,6 +21,14 @@ struct whisper_coreml_context;
 struct whisper_coreml_context * whisper_coreml_init(const char * path_model);
 void whisper_coreml_free(struct whisper_coreml_context * ctx);
 
+// Returns the audio-ctx (post-conv2 time dim) that the variant selected for
+// `n_ctx_actual` mel frames would produce. The caller can use this to size
+// downstream tensors (embd_enc, cross-attention KV cache) before running
+// the encoder. Returns 0 if `ctx` has no variants.
+int64_t whisper_coreml_n_ctx_enc_for(
+        const whisper_coreml_context * ctx,
+                             int64_t   n_ctx_actual);
+
 // Runs the encoder.
 //
 // Parameters:

@@ -131,6 +131,14 @@ static int whisper_coreml_pick_variant(const whisper_coreml_context * ctx, int64
     return ctx->n_variants - 1; // largest available; caller is responsible for not exceeding it
 }
 
+int64_t whisper_coreml_n_ctx_enc_for(const whisper_coreml_context * ctx, int64_t n_ctx_actual) {
+    if (ctx == NULL || ctx->n_variants <= 0) {
+        return 0;
+    }
+    const int idx = whisper_coreml_pick_variant(ctx, n_ctx_actual);
+    return ctx->variants[idx].n_ctx_max / 2;
+}
+
 void whisper_coreml_encode(
         const whisper_coreml_context * ctx,
                              int64_t   n_ctx,
@@ -196,7 +204,12 @@ void whisper_coreml_encode(
                 memset(out, 0, (size_t) out_nelements * sizeof(float));
             }
         } else {
-            const size_t written = (size_t) outCoreML.output.count;
+            const size_t produced = (size_t) outCoreML.output.count;
+            // Clamp against destination capacity: the caller sizes `out`
+            // from the variant it expects (via whisper_coreml_n_ctx_enc_for),
+            // but guard against a malformed model producing more elements.
+            const size_t cap = out_nelements > 0 ? (size_t) out_nelements : produced;
+            const size_t written = produced < cap ? produced : cap;
             if (written > 0 && outCoreML.output.dataPointer != NULL) {
                 memcpy(out, outCoreML.output.dataPointer, written * sizeof(float));
             }
