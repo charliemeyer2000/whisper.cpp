@@ -2413,7 +2413,20 @@ static bool whisper_encode_internal(
             {
                 const int64_t n_ctx_stride = mel->ne[0];
                 const int64_t n_ctx_actual = std::min<int64_t>(n_ctx_stride, std::max<int64_t>(0, (int64_t)(wstate.mel.n_len_org) - (int64_t)(mel_offset)));
-                whisper_coreml_encode(wstate.ctx_coreml, n_ctx_stride, mel->ne[1], n_ctx_actual, (float *) mel->data, (float *) wstate.embd_enc->data, (int64_t) ggml_nelements(wstate.embd_enc));
+                int64_t n_ctx_enc = 0;
+                whisper_coreml_encode(wstate.ctx_coreml, n_ctx_stride, mel->ne[1], n_ctx_actual, (float *) mel->data, (float *) wstate.embd_enc->data, (int64_t) ggml_nelements(wstate.embd_enc), &n_ctx_enc);
+                // Restrict cross-attention (and downstream decoder paths) to
+                // the variant's actual output range. Without this, the zeroed
+                // tail of embd_enc still produces non-zero K/V via bias terms
+                // (K = Wk * 0 + Kb = Kb), so the decoder would attend to
+                // phantom positions with meaningful weight and dilute real
+                // attention. Cap at any pre-existing user-supplied audio_ctx.
+                if (n_ctx_enc > 0) {
+                    const int32_t requested = wstate.exp_n_audio_ctx;
+                    if (requested == 0 || (int64_t) requested > n_ctx_enc) {
+                        wstate.exp_n_audio_ctx = (int32_t) n_ctx_enc;
+                    }
+                }
             }
 #elif defined(WHISPER_USE_OPENVINO)
             whisper_openvino_encode(wstate.ctx_openvino, mel, wstate.embd_enc);

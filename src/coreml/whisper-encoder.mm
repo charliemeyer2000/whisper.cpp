@@ -138,17 +138,26 @@ void whisper_coreml_encode(
                              int64_t   n_ctx_actual,
                                float * mel,
                                float * out,
-                             int64_t   out_nelements) {
+                             int64_t   out_nelements,
+                             int64_t * out_n_ctx_enc) {
     if (n_ctx_actual <= 0 || n_ctx_actual > n_ctx) {
         n_ctx_actual = n_ctx;
     }
 
     const int idx = whisper_coreml_pick_variant(ctx, n_ctx_actual);
     const int64_t n_ctx_model = ctx->variants[idx].n_ctx_max;
+    // The encoder stem has a stride-2 conv2; the audio-ctx (output time dim)
+    // is always n_ctx_model / 2. This is what downstream cross-attention
+    // should see as the valid range.
+    const int64_t n_ctx_enc = n_ctx_model / 2;
+
+    if (out_n_ctx_enc != NULL) {
+        *out_n_ctx_enc = n_ctx_enc;
+    }
 
     if (ctx->n_variants > 1) {
-        NSLog(@"whisper-coreml: encode n_ctx_actual=%lld picked variant=%lldctx",
-              (long long) n_ctx_actual, (long long) n_ctx_model);
+        NSLog(@"whisper-coreml: encode n_ctx_actual=%lld picked variant=%lldctx n_ctx_enc=%lld",
+              (long long) n_ctx_actual, (long long) n_ctx_model, (long long) n_ctx_enc);
     }
 
     // When the chosen variant's shape differs from the source buffer stride,
@@ -177,13 +186,23 @@ void whisper_coreml_encode(
     ];
 
     @autoreleasepool {
-        whisper_encoder_implOutput * outCoreML = [(__bridge id) ctx->variants[idx].data predictionFromLogmel_data:inMultiArray error:nil];
+        NSError * pred_err = nil;
+        whisper_encoder_implOutput * outCoreML = [(__bridge id) ctx->variants[idx].data predictionFromLogmel_data:inMultiArray error:&pred_err];
 
-        const size_t written = (size_t) outCoreML.output.count;
-        memcpy(out, outCoreML.output.dataPointer, written * sizeof(float));
-
-        if (out_nelements > 0 && (size_t) out_nelements > written) {
-            memset(out + written, 0, ((size_t) out_nelements - written) * sizeof(float));
+        if (outCoreML == nil || outCoreML.output == nil) {
+            NSLog(@"whisper-coreml: predictionFromLogmel_data failed: %@",
+                  pred_err ? pred_err.localizedDescription : @"(no error info)");
+            if (out_nelements > 0) {
+                memset(out, 0, (size_t) out_nelements * sizeof(float));
+            }
+        } else {
+            const size_t written = (size_t) outCoreML.output.count;
+            if (written > 0 && outCoreML.output.dataPointer != NULL) {
+                memcpy(out, outCoreML.output.dataPointer, written * sizeof(float));
+            }
+            if (out_nelements > 0 && (size_t) out_nelements > written) {
+                memset(out + written, 0, ((size_t) out_nelements - written) * sizeof(float));
+            }
         }
     }
 }

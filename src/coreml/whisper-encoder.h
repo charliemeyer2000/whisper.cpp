@@ -35,6 +35,13 @@ void whisper_coreml_free(struct whisper_coreml_context * ctx);
 //   out_nelements— total float capacity of `out`. When the selected variant
 //                  produces fewer elements, the tail of `out` is zeroed so
 //                  downstream tensors of fixed size remain well-defined.
+//   out_n_ctx_enc— if non-null, receives the number of audio-ctx tokens
+//                  actually produced by the selected variant (i.e. the
+//                  variant's post-conv2 time dimension). The caller can use
+//                  this to restrict downstream cross-attention — positions
+//                  beyond this range contain zeros, not encoder output, and
+//                  attending to them would pollute attention with bias-only
+//                  keys/values.
 void whisper_coreml_encode(
         const whisper_coreml_context * ctx,
                              int64_t   n_ctx,
@@ -42,7 +49,8 @@ void whisper_coreml_encode(
                              int64_t   n_ctx_actual,
                                float * mel,
                                float * out,
-                             int64_t   out_nelements);
+                             int64_t   out_nelements,
+                             int64_t * out_n_ctx_enc);
 
 #if __cplusplus
 }
