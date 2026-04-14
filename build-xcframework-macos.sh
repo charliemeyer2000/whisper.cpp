@@ -95,7 +95,10 @@ done
 
 TMP_DIR="${BUILD_DIR}/tmp"
 mkdir -p "${TMP_DIR}"
-libtool -static -o "${TMP_DIR}/combined.a" "${LIBS[@]}" 2>/dev/null
+# Filter the benign "same member name (foo.o) in output file used for input
+# files" noise libtool emits when combining static archives with overlapping
+# object names. Real errors (missing objects, arch mismatches) are preserved.
+libtool -static -o "${TMP_DIR}/combined.a" "${LIBS[@]}" 2> >(grep -v 'same member name' >&2)
 
 echo "==> Assembling framework bundle"
 FW_ROOT="${BUILD_DIR}/framework/${FRAMEWORK_NAME}.framework"
