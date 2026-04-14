@@ -99,6 +99,13 @@ struct whisper_coreml_context * whisper_coreml_init(const char * path_model) {
         ctx->variants[0].n_ctx_max = 3000;
         ctx->variants[0].data      = data;
         ctx->n_variants = 1;
+        NSLog(@"whisper-coreml: loaded single encoder at %@", path_model_str);
+    } else {
+        NSMutableArray<NSString *> * shapes = [NSMutableArray array];
+        for (int i = 0; i < ctx->n_variants; ++i) {
+            [shapes addObject: [NSString stringWithFormat: @"%lldctx", (long long) ctx->variants[i].n_ctx_max]];
+        }
+        NSLog(@"whisper-coreml: loaded %d shape variant(s): %@", ctx->n_variants, [shapes componentsJoinedByString: @","]);
     }
 
     return ctx;
@@ -138,6 +145,11 @@ void whisper_coreml_encode(
 
     const int idx = whisper_coreml_pick_variant(ctx, n_ctx_actual);
     const int64_t n_ctx_model = ctx->variants[idx].n_ctx_max;
+
+    if (ctx->n_variants > 1) {
+        NSLog(@"whisper-coreml: encode n_ctx_actual=%lld picked variant=%lldctx",
+              (long long) n_ctx_actual, (long long) n_ctx_model);
+    }
 
     // When the chosen variant's shape differs from the source buffer stride,
     // repack the valid [n_mel][n_ctx_actual] slice into a dense [n_mel][n_ctx_model]
