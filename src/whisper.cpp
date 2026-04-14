@@ -919,6 +919,12 @@ struct whisper_state {
 
     // [EXPERIMENTAL] speed-up techniques
     int32_t exp_n_audio_ctx = 0; // 0 - use default
+    // User-intended audio ctx ceiling. Mirrors exp_n_audio_ctx whenever an
+    // external setter (e.g. params.audio_ctx in whisper_full_with_state) runs,
+    // and is NOT mutated by CoreML variant selection. whisper_encode_internal
+    // reseeds exp_n_audio_ctx from this on entry so a prior call's variant
+    // shrink does not leak across the public whisper_encode API.
+    int32_t exp_n_audio_ctx_user = 0;
 
     whisper_vad_context * vad_context = nullptr;
 
@@ -2365,6 +2371,14 @@ static bool whisper_encode_internal(
     const int64_t t_start_us = ggml_time_us();
 
 #if defined(WHISPER_USE_COREML)
+    // Reseed exp_n_audio_ctx from the user-intended value so a shrink applied
+    // by a prior whisper_encode_internal call does not leak across the public
+    // whisper_encode / whisper_encode_with_state APIs (which, unlike
+    // whisper_full_with_state, do not reset exp_n_audio_ctx themselves).
+    // Inside whisper_full_with_state this is redundant (line 6977 already
+    // reset it), but it is cheap and makes the encode pipeline self-contained.
+    wstate.exp_n_audio_ctx = wstate.exp_n_audio_ctx_user;
+
     // Pre-select the CoreML encoder variant so downstream tensors are sized
     // to the variant's actual output range, not the default 30s. This must
     // happen before whisper_build_graph_conv, which sizes `embd_enc` from
@@ -6974,7 +6988,8 @@ int whisper_full_with_state(
         WHISPER_LOG_ERROR("%s: audio_ctx is larger than the maximum allowed (%d > %d)\n", __func__, params.audio_ctx, whisper_n_audio_ctx(ctx));
         return -5;
     }
-    state->exp_n_audio_ctx = params.audio_ctx;
+    state->exp_n_audio_ctx      = params.audio_ctx;
+    state->exp_n_audio_ctx_user = params.audio_ctx;
 
     // these tokens determine the task that will be performed
     std::vector<whisper_token> prompt_init = { whisper_token_sot(ctx), };
